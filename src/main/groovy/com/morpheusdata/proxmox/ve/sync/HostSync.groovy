@@ -11,6 +11,7 @@ import com.morpheusdata.model.ComputeServer
 import com.morpheusdata.model.ComputeServerType
 import com.morpheusdata.model.OsType
 import com.morpheusdata.model.projection.ComputeServerIdentityProjection
+import com.morpheusdata.proxmox.ve.util.ProxmoxMiscUtil
 import groovy.util.logging.Slf4j
 
 
@@ -22,6 +23,8 @@ class HostSync {
     private ProxmoxVePlugin plugin
     private HttpApiClient apiClient
     private Map authConfig
+    private String hostUID
+    private String hostPWD
 
 
     HostSync(ProxmoxVePlugin proxmoxVePlugin, Cloud cloud, HttpApiClient apiClient) {
@@ -30,6 +33,9 @@ class HostSync {
         this.@morpheusContext = proxmoxVePlugin.morpheus
         this.@apiClient = apiClient
         this.@authConfig = plugin.getAuthConfig(cloud)
+
+        this.@hostUID = cloud.configMap.hostUsername
+        this.@hostPWD = cloud.configMap.hostPassword
     }
 
 
@@ -76,14 +82,14 @@ class HostSync {
     }
 
 
-    private addMissingHosts(Cloud cloud, Collection addList) {
+    private addMissingHosts(Cloud cloud, Collection<Map> addList) {
         log.debug "addMissingHosts: ${cloud} ${addList.size()}"
         def serverType = new ComputeServerType(code: 'proxmox-ve-node')
         def serverOs = new OsType(code: 'linux')
 
-        for(cloudItem in addList) {
+        for (cloudItem in addList) {
             try {
-                log.debug("Adding cloud host: $cloudItem")
+                log.info("Adding cloud host: $cloudItem with IP $cloudItem.ipAddress")
                 def serverConfig = [
                         account          : cloud.owner,
                         category         : "proxmox.ve.host.${cloud.id}",
@@ -92,7 +98,9 @@ class HostSync {
                         resourcePool     : null,
                         externalId       : cloudItem.node,
                         uniqueId         : "${cloud.id}.${cloudItem.node}",
-                        sshUsername      : 'root',
+                        sshHost          : cloudItem.ipAddress,
+                        sshUsername      : hostUID,
+                        sshPassword      : hostPWD,
                         status           : 'provisioned',
                         provision        : false,
                         serverType       : 'hypervisor',
@@ -100,25 +108,29 @@ class HostSync {
                         serverOs         : serverOs,
                         osType           : 'linux',
                         hostname         : cloudItem.node,
-                        externalIp       : cloudItem.ipAddress
+                        externalIp       : cloudItem.ipAddress,
+                        powerState       : (cloudItem.status == 'online') ? ComputeServer.PowerState.on : ComputeServer.PowerState.off
+                ]
+
+                ComputeCapacityInfo capacityInfo = new ComputeCapacityInfo()
+
+                Map capacityFieldValueMap = [
+                        maxCores   : cloudItem.maxcpu?.toLong(),
+                        maxStorage : cloudItem.maxdisk?.toLong(),
+                        usedStorage: cloudItem.disk?.toLong(),
+                        maxMemory  : cloudItem.maxmem?.toLong(),
+                        usedMemory : cloudItem.mem.toLong(),
+                        usedCpu    : cloudItem.maxcpu?.toLong(),
                 ]
 
                 ComputeServer newServer = new ComputeServer(serverConfig)
+                ProxmoxMiscUtil.doUpdateDomainEntity(capacityInfo, capacityFieldValueMap)
+                newServer.capacityInfo = capacityInfo
                 log.debug("Adding Compute Server: $serverConfig")
                 if (!morpheusContext.async.computeServer.bulkCreate([newServer]).blockingGet()){
                     log.error "Error in creating host server ${newServer}"
                 }
 
-                updateMachineMetrics(
-                        newServer,
-                        cloudItem.maxcpu?.toLong(),
-                        cloudItem.maxdisk?.toLong(),
-                        cloudItem.disk?.toLong(),
-                        cloudItem.maxmem?.toLong(),
-                        cloudItem.mem.toLong(),
-                        cloudItem.maxcpu?.toLong(),
-                        (cloudItem.status == 'online') ? ComputeServer.PowerState.on : ComputeServer.PowerState.off
-                )
             } catch(e) {
                 log.error "Error in creating host: ${e}", e
             }
@@ -128,34 +140,57 @@ class HostSync {
 
     private updateMatchedHosts(Cloud cloud, List<SyncTask.UpdateItem<ComputeServer, Map>> updateItems) {
         log.info("Updating ${updateItems.size()} Hosts...")
+        def updates = []
 
-        for(def updateItem in updateItems) {
-            def existingItem = updateItem.existingItem
-            def cloudItem = updateItem.masterItem
-            def doUpdate = false
+        try {
+            for (def updateItem in updateItems) {
+                def existingItem = updateItem.existingItem
+                def cloudItem = updateItem.masterItem
+                def doUpdate = false
 
-            if (cloudItem.hostname != existingItem.hostname) {
-                existingItem.hostname = cloudItem.hostname
-                doUpdate = true
+                ComputeCapacityInfo capacityInfo = existingItem.getComputeCapacityInfo() ?: new ComputeCapacityInfo()
+
+                Map serverFieldValueMap = [
+                        account     : cloud.owner,
+                        category    : "proxmox.ve.host.${cloud.id}",
+                        cloud       : cloud,
+                        name        : cloudItem.node,
+                        resourcePool: null,
+                        uniqueId    : "${cloud.id}.${cloudItem.node}",
+                        //sshHost     : cloudItem.ipAddress,
+                        //sshUsername : hostUID,
+                        //sshPassword : hostPWD,
+                        hostname    : cloudItem.hostName,
+                        externalIp  : cloudItem.ipAddress,
+                        maxCores    : cloudItem.maxcpu?.toLong(),
+                        maxStorage  : cloudItem.maxdisk?.toLong(),
+                        usedStorage : cloudItem.disk?.toLong(),
+                        maxMemory   : cloudItem.maxmem?.toLong(),
+                        usedMemory  : cloudItem.mem.toLong(),
+                        usedCpu     : cloudItem.maxcpu?.toLong(),
+                        powerState  : (cloudItem.status == 'online') ? ComputeServer.PowerState.on : ComputeServer.PowerState.off
+                ]
+
+                Map capacityFieldValueMap = [
+                        maxCores   : cloudItem.maxcpu?.toLong(),
+                        maxStorage : cloudItem.maxdisk?.toLong(),
+                        usedStorage: cloudItem.disk?.toLong(),
+                        maxMemory  : cloudItem.maxmem?.toLong(),
+                        usedMemory : cloudItem.mem.toLong(),
+                        usedCpu    : cloudItem.maxcpu?.toLong(),
+                ]
+
+                if (ProxmoxMiscUtil.doUpdateDomainEntity(existingItem, serverFieldValueMap) ||
+                        ProxmoxMiscUtil.doUpdateDomainEntity(capacityInfo, capacityFieldValueMap)) {
+                    existingItem.capacityInfo = capacityInfo
+                    updates << existingItem
+                }
             }
 
-            if (cloudItem.externalIp != existingItem.externalIp) {
-                existingItem.setExternalIp(cloudItem.externalIp)
-                doUpdate = true
-            }
+            if (updates) morpheusContext.async.computeServer.bulkSave(updates).blockingGet()
 
-            doUpdate ? morpheusContext.async.computeServer.bulkSave([existingItem]).blockingGet() : null
-
-            updateMachineMetrics(
-                    existingItem,
-                    cloudItem.maxcpu?.toLong(),
-                    cloudItem.maxdisk?.toLong(),
-                    cloudItem.disk?.toLong(),
-                    cloudItem.maxmem?.toLong(),
-                    cloudItem.mem.toLong(),
-                    cloudItem.maxcpu?.toLong(),
-                    (cloudItem.status == 'online') ? ComputeServer.PowerState.on : ComputeServer.PowerState.off
-            )
+        } catch(e) {
+            log.warn("error updating host stats: ${e}", e)
         }
 
         //Examples:
@@ -168,63 +203,5 @@ class HostSync {
     private removeMissingHosts(Cloud cloud, List<ComputeServerIdentityProjection> removeList) {
         log.debug("Remove Hosts...")
         morpheusContext.async.computeServer.bulkRemove(removeList).blockingGet()
-    }
-
-
-    private updateMachineMetrics(ComputeServer server, Long maxCores, Long maxStorage, Long usedStorage, Long maxMemory, Long usedMemory, Long maxCpu, ComputeServer.PowerState status) {
-        log.debug "updateMachineMetrics for ${server}"
-        try {
-            def updates = !server.getComputeCapacityInfo()
-            ComputeCapacityInfo capacityInfo = server.getComputeCapacityInfo() ?: new ComputeCapacityInfo()
-
-            if(capacityInfo.maxCores != maxCores || server.maxCores != maxCores) {
-                capacityInfo.maxCores = maxCores
-                server?.maxCores = maxCores
-                updates = true
-            }
-
-            if(capacityInfo.maxStorage != maxStorage || server.maxStorage != maxStorage) {
-                capacityInfo.maxStorage = maxStorage
-                server?.maxStorage = maxStorage
-                updates = true
-            }
-
-            if(capacityInfo.usedStorage != usedStorage || server.usedStorage != usedStorage) {
-                capacityInfo.usedStorage = usedStorage
-                server?.usedStorage = usedStorage
-                updates = true
-            }
-
-            if(capacityInfo.maxMemory != maxMemory || server.maxMemory != maxMemory) {
-                capacityInfo?.maxMemory = maxMemory
-                server?.maxMemory = maxMemory
-                updates = true
-            }
-
-            if(capacityInfo.usedMemory != usedMemory || server.usedMemory != usedMemory) {
-                capacityInfo?.usedMemory = usedMemory
-                server?.usedMemory = usedMemory
-                updates = true
-            }
-
-            if(capacityInfo.maxCpu != maxCpu || server.usedCpu != maxCpu) {
-                capacityInfo?.maxCpu = maxCpu
-                server?.usedCpu = maxCpu
-                updates = true
-            }
-
-            def powerState = capacityInfo.maxCpu > 0 ? ComputeServer.PowerState.on : ComputeServer.PowerState.off
-            if(server.powerState != powerState) {
-                server.powerState = powerState
-                updates = true
-            }
-
-            if(updates == true) {
-                server.capacityInfo = capacityInfo
-                morpheusContext.async.computeServer.bulkSave([server]).blockingGet()
-            }
-        } catch(e) {
-            log.warn("error updating host stats: ${e}", e)
-        }
     }
 }

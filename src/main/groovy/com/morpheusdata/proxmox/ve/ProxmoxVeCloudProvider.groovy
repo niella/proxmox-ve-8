@@ -143,6 +143,33 @@ class ProxmoxVeCloudProvider implements CloudProvider {
 				required: true
 		)
 */
+
+		options << new OptionType(
+				name: 'Host SSH Username',
+				code: 'proxmox-host-username',
+				displayOrder: 5,
+				fieldContext: 'config',
+				fieldLabel: 'Initial Host Username',
+				fieldCode: 'gomorpheus.optiontype.HostUserName',
+				fieldName: 'hostUsername',
+				inputType: OptionType.InputType.TEXT,
+				localCredential: true,
+				required: true
+		)
+		options << new OptionType(
+				name: 'Host SSH Password',
+				code: 'proxmox-host-password',
+				displayOrder: 6,
+				fieldContext: 'config',
+				fieldLabel: 'Initial Host Password',
+				fieldCode: 'gomorpheus.optiontype.HostPassword',
+				fieldName: 'hostPassword',
+				inputType: OptionType.InputType.PASSWORD,
+				localCredential: true,
+				required: true
+		)
+
+
 		return options
 	}
 	/**

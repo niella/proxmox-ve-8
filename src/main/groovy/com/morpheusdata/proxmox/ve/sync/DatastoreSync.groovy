@@ -1,5 +1,7 @@
 package com.morpheusdata.proxmox.ve.sync
 
+import com.morpheusdata.model.ComputeCapacityInfo
+import com.morpheusdata.model.ComputeServer
 import com.morpheusdata.proxmox.ve.ProxmoxVePlugin
 import com.morpheusdata.proxmox.ve.util.ProxmoxApiComputeUtil
 import com.morpheusdata.core.MorpheusContext
@@ -10,6 +12,7 @@ import com.morpheusdata.model.Cloud
 import com.morpheusdata.model.Datastore
 import com.morpheusdata.model.StorageVolume
 import com.morpheusdata.model.projection.DatastoreIdentity
+import com.morpheusdata.proxmox.ve.util.ProxmoxMiscUtil
 import groovy.util.logging.Slf4j
 
 
@@ -99,12 +102,36 @@ class DatastoreSync {
 
 
     private updateMatchedDatastores(Cloud cloud, List<SyncTask.UpdateItem<Datastore, Map>> updateItems) {
-        for (def updateItem in updateItems) {
-            def existingItem = updateItem.existingItem
-            def cloudItem = updateItem.masterItem
+        def updates = []
+        try {
+            for (def updateItem in updateItems) {
+                def existingItem = updateItem.existingItem
+                def cloudItem = updateItem.masterItem
 
-            //Add update logic here...
-            //updateMachineMetrics()
+                    Map datastoreFieldValueMap = [
+                            owner      : new Account(id: cloud.owner.id),
+                            name       : cloudItem.storage,
+                            cloud      : cloud,
+                            storageSize: cloudItem.total.toLong(),
+                            freeSpace  : cloudItem.avail.toLong(),
+                            category   : "proxmox-ve-datastore.${cloud.id}",
+                            drsEnabled : false,
+                            online     : true,
+                            refType    : 'ComputeZone',
+                            refId      : cloud.id,
+                            rawData    : cloudItem.nodes
+                    ]
+
+                    if (ProxmoxMiscUtil.doUpdateDomainEntity(existingItem, datastoreFieldValueMap)) {
+                        updates << existingItem
+                    }
+            }
+            if (updates) {
+                morpheusContext.async.cloud.datastore.bulkSave(updates).blockingGet()
+
+            }
+        } catch (e) {
+            log.warn("error datastore VM properties and stats: ${e}", e)
         }
 
         //Example:
@@ -113,7 +140,7 @@ class DatastoreSync {
 
 
     private removeMissingDatastores(List<Datastore> removeItems) {
-        log.info("Remove Datastores...")
+        log.debug("Remove Datastores $removeItems...")
         morpheusContext.async.cloud.datastore.bulkRemove(removeItems).blockingGet()
     }
 }
