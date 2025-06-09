@@ -3,6 +3,7 @@ package com.morpheusdata.proxmox.ve
 import com.morpheusdata.proxmox.ve.sync.DatastoreSync
 import com.morpheusdata.proxmox.ve.sync.HostSync
 import com.morpheusdata.proxmox.ve.sync.NetworkSync
+import com.morpheusdata.proxmox.ve.sync.PoolSync
 import com.morpheusdata.proxmox.ve.sync.VirtualImageLocationSync
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.Plugin
@@ -30,6 +31,9 @@ import com.morpheusdata.proxmox.ve.util.ProxmoxApiComputeUtil
 import com.morpheusdata.proxmox.ve.sync.VMSync
 import groovy.util.logging.Slf4j
 
+/**
+ * @author Neil van Rensburg
+ */
 
 @Slf4j
 class ProxmoxVeCloudProvider implements CloudProvider {
@@ -440,6 +444,7 @@ class ProxmoxVeCloudProvider implements CloudProvider {
 		HttpApiClient client = new HttpApiClient()
 		try {
 			log.debug("Synchronizing hosts, datastores, networks, VMs and virtual images...")
+			(new PoolSync(plugin, cloudInfo, client)).execute()
 			(new HostSync(plugin, cloudInfo, client)).execute()
 			(new DatastoreSync(plugin, cloudInfo, client)).execute()
 			(new NetworkSync(plugin, cloudInfo, client)).execute()
@@ -500,7 +505,7 @@ class ProxmoxVeCloudProvider implements CloudProvider {
 	 */
 	@Override
 	Boolean hasComputeZonePools() {
-		return false
+		return true
 	}
 
 	/**

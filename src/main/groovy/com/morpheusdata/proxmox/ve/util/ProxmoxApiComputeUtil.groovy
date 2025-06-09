@@ -1,11 +1,15 @@
 package com.morpheusdata.proxmox.ve.util
 
 import com.morpheusdata.core.util.HttpApiClient
+import com.morpheusdata.model.StorageVolume
 import com.morpheusdata.response.ServiceResponse
 import groovy.util.logging.Slf4j
 import org.apache.http.entity.ContentType
 import groovy.json.JsonSlurper
 
+/**
+ * @author Neil van Rensburg
+ */
 
 @Slf4j
 class ProxmoxApiComputeUtil {
@@ -14,43 +18,150 @@ class ProxmoxApiComputeUtil {
     static final Long API_CHECK_WAIT_INTERVAL = 2000
 
 
-    static resizeVM(HttpApiClient client, Map authConfig, String node, String vmId, Long cpu, Long ram, List<Map<String, Object>> targetDSs, List<String> targetNetworks) {
+    static resizeVMDisk(HttpApiClient client, Map authConfig, StorageVolume updatedVolume, String node, String vmId) {
+        def tokenCfg = getApiV2Token(authConfig).data
+        def diskResizeOpts = [
+                headers  : [
+                        'Content-Type'       : 'application/json',
+                        'Cookie'             : "PVEAuthCookie=$tokenCfg.token",
+                        'CSRFPreventionToken': tokenCfg.csrfToken
+                ],
+                body     : [
+                        disk: "$updatedVolume.deviceName",
+                        size: "${updatedVolume.maxStorage as Long / 1024 / 1024 / 1024}G"
+                ],
+                contentType: ContentType.APPLICATION_JSON,
+                ignoreSSL: true
+        ]
+
+        def results = client.callJsonApi(
+                (String) authConfig.apiUrl,
+                "${authConfig.v2basePath}/nodes/$node/qemu/$vmId/resize",
+                null, null,
+                new HttpApiClient.RequestOptions(diskResizeOpts),
+                'PUT'
+        )
+
+        return results
+    }
+
+
+    static addVMDisks(HttpApiClient client, Map authConfig, List<StorageVolume> newVolumes, String node, String vmId) {
+        try {
+            def tokenCfg = getApiV2Token(authConfig).data
+            def diskAddOpts = [
+                headers  : [
+                    'Content-Type'       : 'application/json',
+                    'Cookie'             : "PVEAuthCookie=$tokenCfg.token",
+                    'CSRFPreventionToken': tokenCfg.csrfToken
+                ],
+                body     : [
+                    delete: ""
+                ],
+                contentType: ContentType.APPLICATION_JSON,
+                ignoreSSL: true
+            ]
+
+            newVolumes.each { vol ->
+                def size = "${vol.maxStorage as Long / 1024 / 1024 / 1024}"
+                diskAddOpts.body["$vol.deviceName"] = "${vol.datastore.externalId}:$size,size=${size}G"
+            }
+
+            def results = client.callJsonApi(
+                    (String) authConfig.apiUrl,
+                    "${authConfig.v2basePath}/nodes/$node/qemu/$vmId/config",
+                    null, null,
+                    new HttpApiClient.RequestOptions(diskAddOpts),
+                    'POST'
+            )
+
+            return results
+        } catch (e) {
+            log.error "Error Provisioning VM: ${e}", e
+            return ServiceResponse.error("Error Provisioning VM: ${e}")
+        }
+    }
+
+
+    static deleteVolumes(HttpApiClient client, Map authConfig, String node, String vmId, List<String> ids) {
+        log.debug("deleteVolumes")
+        def tokenCfg = getApiV2Token(authConfig).data
+        def diskRemoveOpts = [
+                headers  : [
+                        'Content-Type'       : 'application/json',
+                        'Cookie'             : "PVEAuthCookie=$tokenCfg.token",
+                        'CSRFPreventionToken': tokenCfg.csrfToken
+                ],
+                body     : [
+                        delete: ""
+                ],
+                contentType: ContentType.APPLICATION_JSON,
+                ignoreSSL: true
+        ]
+
+        try {
+            def success = true
+            def errorMsg = ""
+            ids.each { String diskId ->
+                diskRemoveOpts.body.delete = diskId
+                log.info("Delete request path: \n${authConfig.v2basePath}/nodes/$node/qemu/$vmId/config")
+                log.info("Delete request body: \n$diskRemoveOpts")
+                def diskRemoveResults = client.callJsonApi(
+                        (String) authConfig.apiUrl,
+                        "${authConfig.v2basePath}/nodes/$node/qemu/$vmId/config",
+                        null, null,
+                        new HttpApiClient.RequestOptions(diskRemoveOpts),
+                        'PUT'
+                )
+                if (!diskRemoveResults.success) {
+                    errorMsg += "$diskRemoveResults.error\n"
+                    success = false
+                }
+            }
+            return new ServiceResponse(success: success, msg: errorMsg)
+        } catch (e) {
+            log.error "Error removing VM disk: ${e}", e
+            return ServiceResponse.error("Error removing VM disk: ${e}")
+        }
+    }
+
+
+    static int getHighestScsiDisk(diskList) {
+        def scsiDisks = diskList.findAll { it.label ==~ /scsi\d+/ }
+        if (!scsiDisks) return -1
+
+        def highest = scsiDisks.max { it.label.replace("scsi", "").toInteger() }
+        return highest.label.replace("scsi", "").toInteger()
+    }
+
+
+
+    static resizeVM(HttpApiClient client, Map authConfig, String node, String vmId, Long cpu, Long ram, List<StorageVolume> volumes, List<String> targetNetworks) {
         log.debug("resizeVMCompute")
         Long ramValue = ram / 1024 / 1024
 
-
-        def getHighestScsiDisk = { diskList ->
-            def scsiDisks = diskList.findAll { it.label ==~ /scsi\d+/ }
-            if (!scsiDisks) return null
-
-            def highest = scsiDisks.max { it.label.replace("scsi", "").toInteger() }
-            return highest.label.replace("scsi", "").toInteger()
-        }
-
-        def rootVolume = targetDSs.find {it.isRoot == true }
+        def rootVolume = volumes.find {it.rootVolume }
 
         try {
             log.debug("Resize Boot Disk...")
             def initialTemlpateDisks = getExistingVMStorage(client, authConfig, node, vmId)
-            log.info("TEMPLATE DISKS: $initialTemlpateDisks")
             def tokenCfg = getApiV2Token(authConfig).data
             def resizeOpts = [
-                    headers  : [
-                            'Content-Type'       : 'application/json',
-                            'Cookie'             : "PVEAuthCookie=$tokenCfg.token",
-                            'CSRFPreventionToken': tokenCfg.csrfToken
-                    ],
-                    body     : [
-                            disk  : "${initialTemlpateDisks[0].label}",
-                            size  : "${rootVolume.size}G",
-                    ],
-                    contentType: ContentType.APPLICATION_JSON,
-                    ignoreSSL: true
+                headers  : [
+                        'Content-Type'       : 'application/json',
+                        'Cookie'             : "PVEAuthCookie=$tokenCfg.token",
+                        'CSRFPreventionToken': tokenCfg.csrfToken
+                ],
+                body     : [
+                        disk  : "${initialTemlpateDisks[0].label}",
+                        size  : "${rootVolume.maxStorage as Long / 1024 / 1024 / 1024}G",
+                ],
+                contentType: ContentType.APPLICATION_JSON,
+                ignoreSSL: true
             ]
 
-
-            log.info("PUT path is: $authConfig.apiUrl${authConfig.v2basePath}/nodes/$node/qemu/$vmId/resize")
-            log.info("PUT BODY IS: $resizeOpts.body")
+            //log.info("PUT path is: $authConfig.apiUrl${authConfig.v2basePath}/nodes/$node/qemu/$vmId/resize")
+            //log.info("PUT BODY IS: $resizeOpts.body")
             def resizeResults = client.callJsonApi(
                     (String) authConfig.apiUrl,
                     "${authConfig.v2basePath}/nodes/$node/qemu/$vmId/resize",
@@ -63,49 +174,41 @@ class ProxmoxApiComputeUtil {
 
             log.debug("Resize compute, add additional Disks...")
             def opts = [
-                    headers  : [
-                            'Content-Type'       : 'application/json',
-                            'Cookie'             : "PVEAuthCookie=$tokenCfg.token",
-                            'CSRFPreventionToken': tokenCfg.csrfToken
-                    ],
-                    body     : [
-                            node  : node,
-                            vcpus : cpu,
-                            cores : cpu,
-                            memory: ramValue
-                    ],
-                    contentType: ContentType.APPLICATION_JSON,
-                    ignoreSSL: true
+                headers  : [
+                        'Content-Type'       : 'application/json',
+                        'Cookie'             : "PVEAuthCookie=$tokenCfg.token",
+                        'CSRFPreventionToken': tokenCfg.csrfToken
+                ],
+                body     : [
+                        node  : node,
+                        vcpus : cpu,
+                        cores : cpu,
+                        memory: ramValue
+                ],
+                contentType: ContentType.APPLICATION_JSON,
+                ignoreSSL: true
             ]
 
-            log.info("TARGET DSs: $targetDSs")
-            def nextScsi = getHighestScsiDisk(initialTemlpateDisks) + 1
-            targetDSs.each { ds ->
-                if (!ds.isRoot) {
-                    opts.body["scsi$nextScsi"] = "${ds.datastore.externalId}:${ds.size},size=${ds.size}G"
-                    nextScsi++
+            volumes.each { vol ->
+                if (!vol.rootVolume) {
+                    def size = "${vol.maxStorage as Long / 1024 / 1024 / 1024}"
+                    opts.body["$vol.deviceName"] = "${vol.datastore.externalId}:$size,size=${size}G"
                 }
             }
 
-
-            log.info("TARGET NETWORKS: $targetNetworks")
             def counter = 0
             targetNetworks.each {network ->
                 opts.body["net$counter"] = "bridge=$network,model=e1000e"
                 counter++
             }
 
-
             log.debug("Setting VM Compute Size $vmId on node $node...")
-            log.info("POST path is: $authConfig.apiUrl${authConfig.v2basePath}/nodes/$node/qemu/$vmId/config")
-            log.info("POST BODY IS: $opts.body")
-
             def results = client.callJsonApi(
-                    (String) authConfig.apiUrl,
-                    "${authConfig.v2basePath}/nodes/$node/qemu/$vmId/config",
-                    null, null,
-                    new HttpApiClient.RequestOptions(opts),
-                    'POST'
+                (String) authConfig.apiUrl,
+                "${authConfig.v2basePath}/nodes/$node/qemu/$vmId/config",
+                null, null,
+                new HttpApiClient.RequestOptions(opts),
+                'POST'
             )
 
             return results
@@ -117,12 +220,13 @@ class ProxmoxApiComputeUtil {
 
 
 
-    static cloneTemplate(HttpApiClient client, Map authConfig, String templateId, String name, String nodeId, Long vcpus, Long ram, List<Map<String, Object>> targetDSs, List<String> targetNetworks) {
+    static cloneTemplate(HttpApiClient client, Map authConfig, String templateId, String name, String nodeId, Long vcpus, Long ram, List<StorageVolume> volumes, List<String> targetNetworks) {
         log.debug("cloneTemplate: $templateId")
 
         def rtn = new ServiceResponse(success: true)
         def nextId = callListApiV2(client, "cluster/nextid", authConfig).data
         log.debug("Next VM Id is: $nextId")
+        StorageVolume rootVolume = volumes.find { it.rootVolume }
 
         try {
             def tokenCfg = getApiV2Token(authConfig).data
@@ -139,18 +243,13 @@ class ProxmoxApiComputeUtil {
                             vmid: templateId,
                             name: name,
                             full: true,
-                            storage: "${targetDSs[0].datastore.externalId}"
+                            storage: "${rootVolume.datastore.externalId}"
                     ],
                     contentType: ContentType.APPLICATION_JSON,
                     ignoreSSL: true
             ]
 
-            def counter = 0
-
-
             log.debug("Cloning template $templateId to VM $name($nextId) on node $nodeId")
-            log.debug("Path is: $authConfig.apiUrl${authConfig.v2basePath}/nodes/$nodeId/qemu/$templateId/clone")
-            log.debug("Body data is: $opts.body")
             def results = client.callJsonApi(
                     (String) authConfig.apiUrl,
                     "${authConfig.v2basePath}/nodes/$nodeId/qemu/$templateId/clone",
@@ -171,8 +270,8 @@ class ProxmoxApiComputeUtil {
                     return ServiceResponse.error("Error Provisioning VM. Wait for clone error: ${cloneWaitResult}")
                 }
 
-                log.info("Resizing newly cloned VM. Spec: CPU $vcpus, RAM $ram")
-                ServiceResponse rtnResize = resizeVM(new HttpApiClient(), authConfig, nodeId, nextId, vcpus, ram, targetDSs, targetNetworks)
+                log.debug("Resizing newly cloned VM. Spec: CPU $vcpus, RAM $ram")
+                ServiceResponse rtnResize = resizeVM(new HttpApiClient(), authConfig, nodeId, nextId, vcpus, ram, volumes, targetNetworks)
 
                 if (!rtnResize?.success) {
                     return ServiceResponse.error("Error Sizing VM Compute. Resize compute error: ${rtnResize}")
@@ -232,10 +331,10 @@ class ProxmoxApiComputeUtil {
             throw new Exception("Boot disk for VM not found!")
         }
 
-        vmStorageList << [ label: "$bootDisk", config: vmConfigInfo[bootDisk] ]
+        vmStorageList << [ label: "$bootDisk", config: vmConfigInfo[bootDisk], isRoot: true ]
         vmDiskKeys.each { String diskLabel ->
             if (diskLabel != bootDisk) {
-                vmStorageList << [ label: "$diskLabel", config: vmConfigInfo[diskLabel] ]
+                vmStorageList << [ label: "$diskLabel", config: vmConfigInfo[diskLabel], isRoot: false ]
             }
         }
 
@@ -471,13 +570,35 @@ class ProxmoxApiComputeUtil {
                     ds.nodes = "all"
                 }
 
-                Map dsInfo = callListApiV2(client, "nodes/${queryNode}/storage/${ds.storage}/status", authConfig).data
-                ds.total = dsInfo.total
-                ds.avail = dsInfo.avail
-                ds.used = dsInfo.used
-                ds.enabled = dsInfo.enabled
+                try {
+                    ServiceResponse dsInfoResponse = callListApiV2(client, "nodes/${queryNode}/storage/${ds.storage}/status", authConfig)
+                    
+                    if (dsInfoResponse.success && dsInfoResponse.data instanceof Map) {
+                        Map dsInfo = dsInfoResponse.data as Map
+                        ds.total = dsInfo.total ?: 0
+                        ds.avail = dsInfo.avail ?: 0
+                        ds.used = dsInfo.used ?: 0
+                        ds.enabled = dsInfo.enabled ?: 0
+                    } else {
+                        // Handle case where API call fails (like for offline nodes)
+                        log.warn("Failed to get storage status for ${ds.storage} on node ${queryNode}, using defaults")
+                        ds.total = 0
+                        ds.avail = 0
+                        ds.used = 0
+                        ds.enabled = 0
+                    }
 
-                validDatastores << ds
+                    validDatastores << ds
+                    
+                } catch (Exception e) {
+                    log.error("Error getting datastore status for ${ds.storage} on node ${queryNode}: ${e.message}")
+                    // Set default values and include the datastore anyway
+                    ds.total = 0
+                    ds.avail = 0
+                    ds.used = 0
+                    ds.enabled = 0
+                    validDatastores << ds
+                }
             } else {
                 log.warn("Storage ${ds} ignored...")
             }
@@ -494,27 +615,39 @@ class ProxmoxApiComputeUtil {
         List<String> hosts = getProxmoxHypervisorNodeIds(client, authConfig).data
 
         hosts.each { host ->
-            ServiceResponse hostNetworks = callListApiV2(client, "nodes/$host/network", authConfig)
-            hostNetworks.data.each { Map network ->
-                if (['bridge', 'vlan'].contains(network?.type)) {
-                    network.networkAddress = ""
-                    if (network?.cidr) {
-                        network.networkAddress = ProxmoxMiscUtil.getNetworkAddress(network.cidr)
-                    } else if (network?.address && network?.netmask) {
-                        network.networkAddress = ProxmoxMiscUtil.getNetworkAddress("$network.address/$network.netmask")
+            try {
+                ServiceResponse hostNetworks = callListApiV2(client, "nodes/$host/network", authConfig)
+                if (hostNetworks.success && hostNetworks.data) {
+                    hostNetworks.data.each { Map network ->
+                        if (['bridge', 'vlan'].contains(network?.type)) {
+                            network.networkAddress = ""
+                            if (network?.cidr) {
+                                network.networkAddress = ProxmoxMiscUtil.getNetworkAddress(network.cidr)
+                            } else if (network?.address && network?.netmask) {
+                                network.networkAddress = ProxmoxMiscUtil.getNetworkAddress("$network.address/$network.netmask")
+                            }
+                            network.host = host
+                            networks << network
+                        }
                     }
-                    network.host = host
-                    networks << network
                 }
+            } catch (Exception e) {
+                log.warn("Failed to get networks for host ${host}: ${e.message}")
             }
         }
 
-        ServiceResponse sdnNetworks = callListApiV2(client, "cluster/sdn/vnets", authConfig)
-        sdnNetworks.data.each { Map sdn ->
-            sdn.networkAddress = ''
-            sdn.iface = sdn.vnet
-            sdn.host = "all"
-            networks << sdn
+        try {
+            ServiceResponse sdnNetworks = callListApiV2(client, "cluster/sdn/vnets", authConfig)
+            if (sdnNetworks.success && sdnNetworks.data) {
+                sdnNetworks.data.each { Map sdn ->
+                    sdn.networkAddress = ''
+                    sdn.iface = sdn.vnet
+                    sdn.host = "all"
+                    networks << sdn
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to get SDN networks: ${e.message}")
         }
 
         return new ServiceResponse(success: true, data: networks)
@@ -528,6 +661,7 @@ class ProxmoxApiComputeUtil {
 
         return new ServiceResponse(success: resp.success, data: filteredTemplate)
     }
+
 
     static ServiceResponse listTemplates(HttpApiClient client, Map authConfig) {
         log.debug("API Util listTemplates")
@@ -590,12 +724,44 @@ class ProxmoxApiComputeUtil {
     }
 
 
+    static Map getVMConfigById(HttpApiClient client, Map authConfig, String vmId, String nodeId = "0") {
+
+        //proxmox api limitation. If we don't have the node we need to query all
+        if (nodeId == 0) {
+            Map vm = listVMs(client, authConfig).data.find { it.vmid == vmId }
+            if (!vm) {
+                throw new Exception("Error: VM with ID $vmId not found.")
+            }
+            nodeId = vm.node as Long
+        }
+        def vmConfigInfo = callListApiV2(client, "nodes/$nodeId/qemu/$vmId/config", authConfig)
+
+        return vmConfigInfo.data.data
+    }
+
+
+    static ServiceResponse listProxmoxPools(HttpApiClient client, Map authConfig) {
+        log.debug("listProxmoxPools...")
+        def pools = []
+
+        List<Map> poolIds = callListApiV2(client, "pools", authConfig).data
+
+        poolIds.each { Map pool ->
+            Map poolData = callListApiV2(client, "pools/$pool.poolid", authConfig).data
+            pools << poolData
+        }
+
+        return new ServiceResponse(success: true, data: pools)
+    }
+
+
     static ServiceResponse getProxmoxHypervisorHostByName(HttpApiClient client, Map authConfig, String nodeId) {
         def resp = listProxmoxHypervisorHosts(client, authConfig)
         def node = resp.data.find { it.node == nodeId }
 
         return new ServiceResponse(success: resp.success, data: node)
     }
+
 
     static ServiceResponse getProxmoxHypervisorNodeIds(HttpApiClient client, Map authConfig) {
         log.info("listProxmoxHosts...")
@@ -609,46 +775,115 @@ class ProxmoxApiComputeUtil {
     static ServiceResponse listProxmoxHypervisorHosts(HttpApiClient client, Map authConfig) {
         log.info("listProxmoxHosts...")
 
-        List<Map> allInterfaces = listProxmoxNetworks(client, authConfig).data
-        List<Map> allDatastores = listProxmoxDatastores(client, authConfig).data
+        // Workaround: Get networks safely with error handling
+        List<Map> allInterfaces = []
+        try {
+            ServiceResponse networkResponse = listProxmoxNetworks(client, authConfig)
+            if (networkResponse?.success && networkResponse?.data) {
+                allInterfaces = networkResponse.data
+            }
+        } catch (Exception e) {
+            log.warn("Failed to get network interfaces, continuing without them: ${e.message}")
+            allInterfaces = []
+        }
+        
+        // Get datastores safely with error handling  
+        List<Map> allDatastores = []
+        try {
+            ServiceResponse datastoreResponse = listProxmoxDatastores(client, authConfig)
+            if (datastoreResponse?.success && datastoreResponse?.data) {
+                allDatastores = datastoreResponse.data
+            }
+        } catch (Exception e) {
+            log.warn("Failed to get datastores, continuing without them: ${e.message}")
+            allDatastores = []
+        }
 
         def nodes = callListApiV2(client, "nodes", authConfig).data
         nodes.each { Map hvHost ->
-            def nodeNetworkInfo = callListApiV2(client, "nodes/$hvHost.node/network", authConfig)
-            def sortedNetworks = nodeNetworkInfo.data.sort { a, b ->
-                def aIface = a.iface
-                def bIface = b.iface
+            try {
+                def nodeNetworkInfo = callListApiV2(client, "nodes/$hvHost.node/network", authConfig)
+                
+                // Check if network info was retrieved successfully
+                if (!nodeNetworkInfo.success || !nodeNetworkInfo.data) {
+                    log.warn("Failed to retrieve network info for node ${hvHost.node}, setting default IP")
+                    hvHost.ipAddress = "0.0.0.0"  // Set default IP for offline nodes
+                } else {
+                    def sortedNetworks = nodeNetworkInfo.data.sort { a, b ->
+                        def aIface = a?.iface
+                        def bIface = b?.iface
 
-                // Push null/empty iface to the bottom
-                if (!aIface && bIface) return 1
-                if (!bIface && aIface) return -1
-                if (!aIface && !bIface) return 0
+                        // Push null/empty iface to the bottom
+                        if (!aIface && bIface) return 1
+                        if (!bIface && aIface) return -1
+                        if (!aIface && !bIface) return 0
 
-                // Prioritize vmbr0
-                if (aIface == 'vmbr0') return -1
-                if (bIface == 'vmbr0') return 1
+                        // Prioritize vmbr0
+                        if (aIface == 'vmbr0') return -1
+                        if (bIface == 'vmbr0') return 1
 
-                // Normal alphabetical sort
-                return aIface <=> bIface
+                        // Normal alphabetical sort
+                        return aIface <=> bIface
+                    }
+                    
+                    log.debug("Sorted Networks for node ${hvHost.node}: $sortedNetworks")
+                    
+                    // Find the first network interface with a valid address
+                    def validInterface = sortedNetworks.find { it != null && it.address != null && it.address.trim() != "" }
+                    
+                    if (validInterface) {
+                        hvHost.ipAddress = validInterface.address
+                        log.debug("Set IP address for node ${hvHost.node}: ${hvHost.ipAddress}")
+                    } else {
+                        log.warn("No valid network interface found for node ${hvHost.node}, using node name as fallback")
+                        hvHost.ipAddress = hvHost.node  // Use node name as fallback
+                    }
+                }
+
+                // Set networks (with null checking and safe fallback)
+                if (allInterfaces) {
+                    hvHost.networks = allInterfaces
+                            ?.findAll { it?.host == hvHost.node || it?.host == 'all' }
+                            ?.collect { it?.iface }
+                            ?.findAll { it != null } ?: []
+                } else {
+                    // Fallback: extract from direct node network call
+                    hvHost.networks = nodeNetworkInfo?.data?.findAll { it?.iface }?.collect { it.iface } ?: []
+                }
+
+                log.info("ALL DS: $allDatastores")
+                
+                // Set datastores (with null checking and safe fallback)
+                if (allDatastores) {
+                    hvHost.datastores = allDatastores
+                            ?.findAll { ds -> 
+                                def dsNodes = ds?.nodes?.toString()
+                                return dsNodes && (dsNodes.split(",").contains(hvHost.node) || dsNodes == 'all')
+                            }
+                            ?.collect { it?.storage }
+                            ?.findAll { it != null } ?: []
+                } else {
+                    // Fallback: try to get datastores directly for this node
+                    try {
+                        ServiceResponse nodeStorageResponse = callListApiV2(client, "nodes/${hvHost.node}/storage", authConfig)
+                        if (nodeStorageResponse?.success && nodeStorageResponse?.data) {
+                            hvHost.datastores = nodeStorageResponse.data.collect { it?.storage }.findAll { it != null }
+                        } else {
+                            hvHost.datastores = []
+                        }
+                    } catch (Exception e) {
+                        log.warn("Failed to get storage for node ${hvHost.node}: ${e.message}")
+                        hvHost.datastores = []
+                    }
+                }
+                        
+            } catch (Exception e) {
+                log.error("Error processing node ${hvHost.node}: ${e.message}", e)
+                // Set default values for failed nodes
+                hvHost.ipAddress = "0.0.0.0"
+                hvHost.networks = []
+                hvHost.datastores = []
             }
-            log.info("Sorted")
-            log.info("Sorted")
-            log.info("Sorted")
-            log.info("Sorted")
-            log.info("Sorted")
-            log.info("Sorted Networks: $sortedNetworks")
-            log.info("Sorted")
-            log.info("Sorted")
-            hvHost.ipAddress = sortedNetworks[0].address
-
-            hvHost.networks = allInterfaces
-                    .findAll { it.host == hvHost.node || it.host == 'all' }
-                    .collect { it.iface }
-
-            log.info("ALL DS: $allDatastores")
-            hvHost.datastores = allDatastores
-                    .findAll { it.nodes.split(",").contains(hvHost.node) || it.nodes == 'all' }
-                    .collect { it.storage }
         }
 
         return new ServiceResponse(success: true, data: nodes)
@@ -731,45 +966,4 @@ class ProxmoxApiComputeUtil {
         }
         return rtn
     }
-
-/*    private static ServiceResponse getApiV2Token(String uid, String pwd, String baseUrl) {
-        def path = "access/ticket"
-        log.debug("getApiV2Token: path: ${path}")
-        HttpApiClient client = new HttpApiClient()
-
-        def rtn = new ServiceResponse(success: false)
-        try {
-
-            def encUid = URLEncoder.encode((String) uid, "UTF-8")
-            def encPwd = URLEncoder.encode((String) pwd, "UTF-8")
-            def bodyStr = "username=" + "$encUid" + "&password=$encPwd"
-
-            HttpApiClient.RequestOptions opts = new HttpApiClient.RequestOptions(
-                    headers: ['Content-Type':'application/x-www-form-urlencoded'],
-                    body: bodyStr,
-                    contentType: ContentType.APPLICATION_FORM_URLENCODED,
-                    ignoreSSL: true
-            )
-            def results = client.callJsonApi(baseUrl,"${API_BASE_PATH}/${path}", opts, 'POST')
-
-            log.debug("getApiV2Token API request results: ${results.toMap()}")
-            if(results?.success && !results?.hasErrors()) {
-                rtn.success = true
-                def tokenData = results.data.data
-                rtn.data = [csrfToken: tokenData.CSRFPreventionToken, token: tokenData.ticket]
-
-            } else {
-                rtn.success = false
-                rtn.msg = "Error retrieving token: $results.data"
-                log.error("Error retrieving token: $results.data")
-            }
-            return rtn
-        } catch(e) {
-            log.error "Error in getApiV2Token: ${e}", e
-            rtn.msg = "Error in getApiV2Token: ${e}"
-            rtn.success = false
-        }
-        return rtn
-    }
-    */
 }

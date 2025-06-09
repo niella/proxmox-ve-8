@@ -32,5 +32,5 @@ resource "option-type" "proxmox-nodes" {
   type = "select"
   displayOrder = 102
   required = true
-  optionSource = "proxmoxVeNode"
+  optionSource = "proxmoxNodes"  
 }

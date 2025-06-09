@@ -3,19 +3,22 @@
 - [X] Add Host SSH Inputs to Options
 - [X] Cleanup sync updates
 - [X] Check agentless provision
-- [ ] Refactor ssh code to util class
-- [ ] Add resource pools
-- [ ] Add provision host
+- [X] Refactor ssh code to util class
+- [X] Add resource pool sync
+- [ ] Add resource pool selection to provision (and filter datastores)
+- [ ] Add provision container host
 - [X] Fix powerstate on initial host add
 - [ ] Cleanup logging
 - [ ] Fix Validation display
-- [ ] Fix datastore tab on instance 
-- [ ] Add reconfigure for disks and nics
+- [X] Fix storage tab on instance 
+- [ ] Add reconfigure for disks
+- [ ] Add reconfigure for nics
 - [ ] Investigate "Starting determineSshRoute with hostList: []" when skipping agent
 - [ ] Fix validation errors not appearing in instance wizard
 - [ ] Improve ssh error tracking
-- [ ] Add LICENSE
+- [X] Add LICENSE
 - [ ] Populate README
 - [ ] Jar Folder
 - [ ] Snapshot Backup Provider
 - [ ] Scribe resources for Morpheus OS images
+- [ ] Proxy support

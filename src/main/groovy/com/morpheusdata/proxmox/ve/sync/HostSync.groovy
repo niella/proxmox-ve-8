@@ -14,6 +14,9 @@ import com.morpheusdata.model.projection.ComputeServerIdentityProjection
 import com.morpheusdata.proxmox.ve.util.ProxmoxMiscUtil
 import groovy.util.logging.Slf4j
 
+/**
+ * @author Neil van Rensburg
+ */
 
 @Slf4j
 class HostSync {
@@ -26,6 +29,9 @@ class HostSync {
     private String hostUID
     private String hostPWD
 
+    /**
+     * @author Neil van Rensburg
+     */
 
     HostSync(ProxmoxVePlugin proxmoxVePlugin, Cloud cloud, HttpApiClient apiClient) {
         this.@plugin = proxmoxVePlugin
@@ -90,6 +96,14 @@ class HostSync {
         for (cloudItem in addList) {
             try {
                 log.info("Adding cloud host: $cloudItem with IP $cloudItem.ipAddress")
+                
+                // Handle null values with safe defaults for offline nodes
+                def maxCpu = cloudItem.maxcpu ?: 0
+                def maxMem = cloudItem.maxmem ?: 0
+                def usedMem = cloudItem.mem ?: 0
+                def maxDisk = cloudItem.maxdisk ?: 0
+                def usedDisk = cloudItem.disk ?: 0
+                
                 def serverConfig = [
                         account          : cloud.owner,
                         category         : "proxmox.ve.host.${cloud.id}",
@@ -115,12 +129,12 @@ class HostSync {
                 ComputeCapacityInfo capacityInfo = new ComputeCapacityInfo()
 
                 Map capacityFieldValueMap = [
-                        maxCores   : cloudItem.maxcpu?.toLong(),
-                        maxStorage : cloudItem.maxdisk?.toLong(),
-                        usedStorage: cloudItem.disk?.toLong(),
-                        maxMemory  : cloudItem.maxmem?.toLong(),
-                        usedMemory : cloudItem.mem.toLong(),
-                        usedCpu    : cloudItem.maxcpu?.toLong(),
+                        maxCores   : maxCpu.toLong(),
+                        maxStorage : maxDisk.toLong(),
+                        usedStorage: usedDisk.toLong(),
+                        maxMemory  : maxMem.toLong(),
+                        usedMemory : usedMem.toLong(),
+                        usedCpu    : maxCpu.toLong(),
                 ]
 
                 ComputeServer newServer = new ComputeServer(serverConfig)
@@ -150,6 +164,13 @@ class HostSync {
 
                 ComputeCapacityInfo capacityInfo = existingItem.getComputeCapacityInfo() ?: new ComputeCapacityInfo()
 
+                // Handle null values with safe defaults for offline nodes
+                def maxCpu = cloudItem.maxcpu ?: 0
+                def maxMem = cloudItem.maxmem ?: 0
+                def usedMem = cloudItem.mem ?: 0
+                def maxDisk = cloudItem.maxdisk ?: 0
+                def usedDisk = cloudItem.disk ?: 0
+
                 Map serverFieldValueMap = [
                         account     : cloud.owner,
                         category    : "proxmox.ve.host.${cloud.id}",
@@ -160,24 +181,24 @@ class HostSync {
                         //sshHost     : cloudItem.ipAddress,
                         //sshUsername : hostUID,
                         //sshPassword : hostPWD,
-                        hostname    : cloudItem.hostName,
+                        hostname    : cloudItem.hostName ?: cloudItem.node,
                         externalIp  : cloudItem.ipAddress,
-                        maxCores    : cloudItem.maxcpu?.toLong(),
-                        maxStorage  : cloudItem.maxdisk?.toLong(),
-                        usedStorage : cloudItem.disk?.toLong(),
-                        maxMemory   : cloudItem.maxmem?.toLong(),
-                        usedMemory  : cloudItem.mem.toLong(),
-                        usedCpu     : cloudItem.maxcpu?.toLong(),
+                        maxCores    : maxCpu.toLong(),
+                        maxStorage  : maxDisk.toLong(),
+                        usedStorage : usedDisk.toLong(),
+                        maxMemory   : maxMem.toLong(),
+                        usedMemory  : usedMem.toLong(),
+                        usedCpu     : maxCpu.toLong(),
                         powerState  : (cloudItem.status == 'online') ? ComputeServer.PowerState.on : ComputeServer.PowerState.off
                 ]
 
                 Map capacityFieldValueMap = [
-                        maxCores   : cloudItem.maxcpu?.toLong(),
-                        maxStorage : cloudItem.maxdisk?.toLong(),
-                        usedStorage: cloudItem.disk?.toLong(),
-                        maxMemory  : cloudItem.maxmem?.toLong(),
-                        usedMemory : cloudItem.mem.toLong(),
-                        usedCpu    : cloudItem.maxcpu?.toLong(),
+                        maxCores   : maxCpu.toLong(),
+                        maxStorage : maxDisk.toLong(),
+                        usedStorage: usedDisk.toLong(),
+                        maxMemory  : maxMem.toLong(),
+                        usedMemory : usedMem.toLong(),
+                        usedCpu    : maxCpu.toLong(),
                 ]
 
                 if (ProxmoxMiscUtil.doUpdateDomainEntity(existingItem, serverFieldValueMap) ||

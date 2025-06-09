@@ -1,7 +1,5 @@
 package com.morpheusdata.proxmox.ve.sync
 
-import com.morpheusdata.model.ComputeCapacityInfo
-import com.morpheusdata.model.ComputeServer
 import com.morpheusdata.proxmox.ve.ProxmoxVePlugin
 import com.morpheusdata.proxmox.ve.util.ProxmoxApiComputeUtil
 import com.morpheusdata.core.MorpheusContext
@@ -16,6 +14,9 @@ import com.morpheusdata.proxmox.ve.util.ProxmoxMiscUtil
 import groovy.util.logging.Slf4j
 
 
+/**
+ * @author Neil van Rensburg
+ */
 
 @Slf4j
 class DatastoreSync {
