@@ -9,10 +9,9 @@
 - [ ] Add provision container host
 - [X] Fix powerstate on initial host add
 - [ ] Cleanup logging
-- [ ] Fix Validation display
 - [X] Fix storage tab on instance 
-- [ ] Add reconfigure for disks
-- [ ] Add reconfigure for nics
+- [X] Add reconfigure for disks
+- [X] Add reconfigure for nics
 - [ ] Investigate "Starting determineSshRoute with hostList: []" when skipping agent
 - [ ] Fix validation errors not appearing in instance wizard
 - [ ] Improve ssh error tracking
