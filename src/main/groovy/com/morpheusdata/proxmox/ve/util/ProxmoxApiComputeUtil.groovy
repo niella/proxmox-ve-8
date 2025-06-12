@@ -1,6 +1,8 @@
 package com.morpheusdata.proxmox.ve.util
 
 import com.morpheusdata.core.util.HttpApiClient
+import com.morpheusdata.model.ComputeServer
+import com.morpheusdata.model.ComputeServerInterface
 import com.morpheusdata.model.StorageVolume
 import com.morpheusdata.response.ServiceResponse
 import groovy.util.logging.Slf4j
@@ -16,6 +18,90 @@ class ProxmoxApiComputeUtil {
 
     //static final String API_BASE_PATH = "/api2/json"
     static final Long API_CHECK_WAIT_INTERVAL = 2000
+
+
+    static addVMNics(HttpApiClient client, Map authConfig, List<ComputeServerInterface> newNics, String node, String vmId) {
+        try {
+            def tokenCfg = getApiV2Token(authConfig).data
+            def diskAddOpts = [
+                    headers  : [
+                            'Content-Type'       : 'application/json',
+                            'Cookie'             : "PVEAuthCookie=$tokenCfg.token",
+                            'CSRFPreventionToken': tokenCfg.csrfToken
+                    ],
+                    body     : [:],
+                    contentType: ContentType.APPLICATION_JSON,
+                    ignoreSSL: true
+            ]
+
+            newNics.each { nic ->
+                diskAddOpts.body["$nic.externalId"] = "bridge=$nic.network.externalId,model=e1000e"
+            }
+
+            def results = client.callJsonApi(
+                    (String) authConfig.apiUrl,
+                    "${authConfig.v2basePath}/nodes/$node/qemu/$vmId/config",
+                    null, null,
+                    new HttpApiClient.RequestOptions(diskAddOpts),
+                    'POST'
+            )
+
+            return results
+        } catch (e) {
+            log.error "Error Adding NICs: ${e}", e
+            return ServiceResponse.error("Error Adding NICs: ${e}")
+        }
+    }
+
+
+    static List<Map> getExistingVMInterfaces(HttpApiClient client, Map authConfig, String nodeId, String vmId) {
+
+        def vmConfigInfo = callListApiV2(client, "nodes/$nodeId/qemu/$vmId/config", authConfig).data
+        log.info("VM Config Info: $vmConfigInfo")
+        def nicInterfaces = vmConfigInfo.findAll { k, v -> k ==~ /net\d+/ }.collect { k, v -> [ label: k, value: v] }
+        return nicInterfaces
+    }
+
+
+    static removeNetworkInterfaces(HttpApiClient client, Map authConfig, List<ComputeServerInterface> deletedNics, String node, String vmId) {
+        log.debug("deleteVolumes")
+        def tokenCfg = getApiV2Token(authConfig).data
+        def nicRemoveOpts = [
+                headers  : [
+                        'Content-Type'       : 'application/json',
+                        'Cookie'             : "PVEAuthCookie=$tokenCfg.token",
+                        'CSRFPreventionToken': tokenCfg.csrfToken
+                ],
+                body     : [
+                        delete: ""
+                ],
+                contentType: ContentType.APPLICATION_JSON,
+                ignoreSSL: true
+        ]
+
+        try {
+            def success = true
+            def errorMsg = ""
+            deletedNics.each { ComputeServerInterface nic ->
+                nicRemoveOpts.body.delete = nic.externalId
+                def nicRemoveResults = client.callJsonApi(
+                        (String) authConfig.apiUrl,
+                        "${authConfig.v2basePath}/nodes/$node/qemu/$vmId/config",
+                        null, null,
+                        new HttpApiClient.RequestOptions(nicRemoveOpts),
+                        'PUT'
+                )
+                if (!nicRemoveResults.success) {
+                    errorMsg += "$nicRemoveResults.error\n"
+                    success = false
+                }
+            }
+            return new ServiceResponse(success: success, msg: errorMsg)
+        } catch (e) {
+            log.error "Error removing VM Network Interface: ${e}", e
+            return ServiceResponse.error("Error removing VM Network Interface: ${e}")
+        }
+    }
 
 
     static resizeVMDisk(HttpApiClient client, Map authConfig, StorageVolume updatedVolume, String node, String vmId) {
@@ -104,8 +190,8 @@ class ProxmoxApiComputeUtil {
             def errorMsg = ""
             ids.each { String diskId ->
                 diskRemoveOpts.body.delete = diskId
-                log.info("Delete request path: \n${authConfig.v2basePath}/nodes/$node/qemu/$vmId/config")
-                log.info("Delete request body: \n$diskRemoveOpts")
+                log.debug("Delete request path: \n${authConfig.v2basePath}/nodes/$node/qemu/$vmId/config")
+                log.debug("Delete request body: \n$diskRemoveOpts")
                 def diskRemoveResults = client.callJsonApi(
                         (String) authConfig.apiUrl,
                         "${authConfig.v2basePath}/nodes/$node/qemu/$vmId/config",
@@ -136,7 +222,7 @@ class ProxmoxApiComputeUtil {
 
 
 
-    static resizeVM(HttpApiClient client, Map authConfig, String node, String vmId, Long cpu, Long ram, List<StorageVolume> volumes, List<String> targetNetworks) {
+    static resizeVM(HttpApiClient client, Map authConfig, String node, String vmId, Long cpu, Long ram, List<StorageVolume> volumes, List<ComputeServerInterface> nics) {
         log.debug("resizeVMCompute")
         Long ramValue = ram / 1024 / 1024
 
@@ -160,8 +246,6 @@ class ProxmoxApiComputeUtil {
                 ignoreSSL: true
             ]
 
-            //log.info("PUT path is: $authConfig.apiUrl${authConfig.v2basePath}/nodes/$node/qemu/$vmId/resize")
-            //log.info("PUT BODY IS: $resizeOpts.body")
             def resizeResults = client.callJsonApi(
                     (String) authConfig.apiUrl,
                     "${authConfig.v2basePath}/nodes/$node/qemu/$vmId/resize",
@@ -170,8 +254,7 @@ class ProxmoxApiComputeUtil {
                     'PUT'
             )
 
-            log.info("Resize results: $resizeResults")
-
+            log.debug("Post deployment Resize results: $resizeResults")
             log.debug("Resize compute, add additional Disks...")
             def opts = [
                 headers  : [
@@ -196,10 +279,14 @@ class ProxmoxApiComputeUtil {
                 }
             }
 
-            def counter = 0
-            targetNetworks.each {network ->
-                opts.body["net$counter"] = "bridge=$network,model=e1000e"
-                counter++
+//            def counter = 0
+//            targetNetworks.each {network ->
+//                opts.body["net$counter"] = "bridge=$network,model=e1000e"
+//                counter++
+//            }
+
+            nics.each { nic ->
+                opts.body["$nic.externalId"] = "bridge=$nic.network.externalId,model=e1000e"
             }
 
             log.debug("Setting VM Compute Size $vmId on node $node...")
@@ -220,9 +307,14 @@ class ProxmoxApiComputeUtil {
 
 
 
-    static cloneTemplate(HttpApiClient client, Map authConfig, String templateId, String name, String nodeId, Long vcpus, Long ram, List<StorageVolume> volumes, List<String> targetNetworks) {
+    static cloneTemplate(HttpApiClient client, Map authConfig, String templateId, String name, String nodeId, ComputeServer server) {
+        //Long vcpus, Long ram, List<StorageVolume> volumes, List<String> targetNetworks) {
         log.debug("cloneTemplate: $templateId")
 
+        Long vcpus = server.maxCores
+        Long ram = server.maxMemory
+        List<StorageVolume> volumes = server.volumes
+        List<ComputeServerInterface> nics = server.interfaces
         def rtn = new ServiceResponse(success: true)
         def nextId = callListApiV2(client, "cluster/nextid", authConfig).data
         log.debug("Next VM Id is: $nextId")
@@ -270,8 +362,8 @@ class ProxmoxApiComputeUtil {
                     return ServiceResponse.error("Error Provisioning VM. Wait for clone error: ${cloneWaitResult}")
                 }
 
-                log.debug("Resizing newly cloned VM. Spec: CPU $vcpus, RAM $ram")
-                ServiceResponse rtnResize = resizeVM(new HttpApiClient(), authConfig, nodeId, nextId, vcpus, ram, volumes, targetNetworks)
+                log.debug("Resizing newly cloned VM. Spec: CPU: $vcpus,\n RAM: $ram,\n Volumes: $volumes,\n NICs: $nics")
+                ServiceResponse rtnResize = resizeVM(new HttpApiClient(), authConfig, nodeId, nextId, vcpus, ram, volumes, nics)
 
                 if (!rtnResize?.success) {
                     return ServiceResponse.error("Error Sizing VM Compute. Resize compute error: ${rtnResize}")
@@ -295,7 +387,6 @@ class ProxmoxApiComputeUtil {
     static List<Map> getExistingVMStorage(HttpApiClient client, Map authConfig, String nodeId, String vmId) {
 
         def vmConfigInfo = callListApiV2(client, "nodes/$nodeId/qemu/$vmId/config", authConfig).data
-        log.info("nodes/$nodeId/qemu/$vmId/config: $vmConfigInfo")
         def validBootDisks = ["scsi0", "virtio0", "sata0", "ide0"]
         def bootEntries = vmConfigInfo.boot?.trim()?.replaceAll("order=", "")?.split(/[;,\s]+/)
         def bootDisk = ""
@@ -513,7 +604,7 @@ class ProxmoxApiComputeUtil {
             log.debug("Path is: $authConfig.apiUrl${authConfig.v2basePath}/nodes/$nodeId/qemu/$vmId/config")
 
             while (duration < timeout) {
-                log.info("Checking VM $vmId status on node $nodeId")
+                log.debug("Checking VM $vmId status on node $nodeId")
                 def results = client.callJsonApi(
                         (String) authConfig.apiUrl,
                         "${authConfig.v2basePath}/nodes/$nodeId/qemu/$vmId/config",
@@ -528,7 +619,6 @@ class ProxmoxApiComputeUtil {
                 }
 
                 def resultData = new JsonSlurper().parseText(results.content)
-                log.info("Check results: $resultData")
                 if (!resultData.data.containsKey("lock")) {
                     return results
                 } else {
@@ -764,7 +854,7 @@ class ProxmoxApiComputeUtil {
 
 
     static ServiceResponse getProxmoxHypervisorNodeIds(HttpApiClient client, Map authConfig) {
-        log.info("listProxmoxHosts...")
+        log.debug("listProxmoxHosts...")
 
         List<String> hvHostIds = callListApiV2(client, "nodes", authConfig).data.collect { it.node as String }
 
@@ -773,7 +863,7 @@ class ProxmoxApiComputeUtil {
 
 
     static ServiceResponse listProxmoxHypervisorHosts(HttpApiClient client, Map authConfig) {
-        log.info("listProxmoxHosts...")
+        log.debug("listProxmoxHosts...")
 
         // Workaround: Get networks safely with error handling
         List<Map> allInterfaces = []
@@ -851,8 +941,6 @@ class ProxmoxApiComputeUtil {
                     hvHost.networks = nodeNetworkInfo?.data?.findAll { it?.iface }?.collect { it.iface } ?: []
                 }
 
-                log.info("ALL DS: $allDatastores")
-                
                 // Set datastores (with null checking and safe fallback)
                 if (allDatastores) {
                     hvHost.datastores = allDatastores
