@@ -17,7 +17,7 @@
 - [ ] Fix validation errors not appearing in instance wizard
 - [ ] Improve ssh error tracking
 - [X] Add LICENSE
-- [ ] Populate README
+- [X] Populate README
 - [ ] Jar Folder
 - [ ] Snapshot Backup Provider
 - [ ] Scribe resources for Morpheus OS images
